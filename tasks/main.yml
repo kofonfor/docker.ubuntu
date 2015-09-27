@@ -10,10 +10,7 @@
   when: kernel_update_and_reboot_permitted or install_kernel_extras
 
 - name: Add Docker repository key
-  apt_key:
-    id: "{{ apt_key_sig }}"
-    url: "{{ apt_key_url }}"
-    state: present
+  shell: wget -qO - http://get.docker.io/gpg | sudo apt-key add -
 
 - name: Add Docker repository and update apt cache
   apt_repository:
