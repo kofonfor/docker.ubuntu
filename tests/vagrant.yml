@@ -11,7 +11,7 @@
   become: yes
   vars:
     docker_group_members:
-      - "{{ ansible_ssh_user }}"
+      - "{{ ansible_user }}"
   roles:
     - role: docker.ubuntu
       kernel_update_and_reboot_permitted: yes
@@ -29,5 +29,11 @@
     - name: Remove the dummy container
       docker_container:
         name: foobar
+        state: absent
+      when: container_creation.changed
+
+    - name: Remove the dummy image
+      docker_image:
+        name: busybox
         state: absent
       when: container_creation.changed

@@ -3,20 +3,20 @@
 - name: "Include proper python vars file"
   include_vars: "{{ python_vars_file }}"
 
-- name: Fail if not a new release of Ubuntu
+- name: Fail if not a supported release of Ubuntu
   fail:
     msg: "{{ ansible_distribution_version }} is not an acceptable version of Ubuntu for this role"
-  when: ansible_lsb.id|lower == "ubuntu" and ( ansible_distribution_version|version_compare('12.04', '<') or ansible_distribution_version|version_compare('12.10', '=') )
+  when: ansible_lsb.id|lower == "ubuntu" and ansible_distribution_version is version_compare('14.04', '<')
 
 - name: Fail if not a new release of Debian
   fail:
     msg: "{{ ansible_distribution_version }} is not an acceptable version of Debian for this role"
-  when: ansible_lsb.id|lower == "debian" and ansible_distribution_version|version_compare('8.5', '<')
+  when: ansible_lsb.id|lower == "debian" and ansible_distribution_version is version_compare('8.5', '<')
 
 - name: Fail if using python3 with Ansible<2.3
   fail:
     msg: "Ansible 2.3+ is required to use Python3 interpreter."
-  when: ansible_version.full | version_compare('2.3', '<') and ansible_python_interpreter is defined and 'python3' in ansible_python_interpreter
+  when: ansible_version.full is version_compare('2.3', '<') and ansible_python_interpreter is defined and 'python3' in ansible_python_interpreter
 
 - name: Update kernel, kernel extras, Xorg pkgs, and related tasks
   include: kernel_check_and_update.yml
@@ -24,34 +24,24 @@
 
 - name: Uninstall old versions of Docker
   apt:
-    name: "{{ item }}"
+    name:
+      - docker
+      - docker-engine
+      - docker.io
     state: absent
-  with_items:
-    - docker
-    - docker-engine
-    - docker.io
   when: uninstall_previous_docker_versions
-
-# Fix for https://github.com/docker/docker/issues/23347
-- name: Install dmsetup for Ubuntu 16.04
-  apt:
-    pkg: dmsetup
-    state: "{{ dmsetup_pkg_state }}"
-    update_cache: "{{ 'yes' if dmsetup_pkg_state=='latest' else 'no' }}"
-    cache_valid_time: "{{ docker_apt_cache_valid_time }}"
-  register: dmsetup_result
-  when: ansible_distribution_version|version_compare('16.04', '=')
 
 - name: Install linux-image-extra-* packages to enable AuFS driver
   apt:
-    pkg: "{{ item }}"
+    pkg:
+      - linux-image-extra-{{ ansible_kernel }}
+      - linux-image-extra-virtual
     state: present
     update_cache: yes
     cache_valid_time: "{{ docker_apt_cache_valid_time }}"
-  with_items:
-    - linux-image-extra-{{ ansible_kernel }}
-    - linux-image-extra-virtual
-  when: docker_aufs_enabled and ansible_distribution_version|version_compare('14.04', '==')
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  when: docker_aufs_enabled and ansible_distribution_version is version_compare('14.04', '==') and ansible_kernel is version_compare('4.4', '<')
+
   register: linux_image_extra_install
   ignore_errors: yes
 
@@ -61,18 +51,16 @@
     state: present
     update_cache: yes
     cache_valid_time: "{{ docker_apt_cache_valid_time }}"
-  when: linux_image_extra_install|failed
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  when: linux_image_extra_install is failed
 
-- name: Run dmsetup for Ubuntu 16.04
-  command: dmsetup mknodes
-  when: dmsetup_result.changed
-
-- name: Ensure GNUPG-curl is available for https
+- name: Ensure dirmngr is available
   apt:
-    pkg: gnupg-curl
+    pkg: "{{ apt_dirmngr_pkg }}"
     state: present
     update_cache: yes
     cache_valid_time: "{{ docker_apt_cache_valid_time }}"
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
 
 - name: Add Docker repository key
   apt_key:
@@ -80,16 +68,19 @@
     keyserver: "{{ apt_key_url }}"
     state: present
   register: add_repository_key
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
   ignore_errors: true
 
 - name: Alternative | Add Docker repository key
-  shell: "curl -sSL {{ apt_key_url }} | sudo apt-key add -"
-  when: add_repository_key|failed
+  shell: "apt-key adv --fetch-keys {{ apt_key_url }}"
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  when: add_repository_key is failed
 
 - name: HTTPS APT transport for Docker repository
   apt:
     name: apt-transport-https
     state: present
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
 
 - name: Add Docker repository and update apt cache
   apt_repository:
@@ -97,6 +88,7 @@
     mode: '644'
     update_cache: yes
     state: present
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
 
 - name: Install (or update) docker package
   apt:
@@ -104,26 +96,46 @@
     state: "{{ 'latest' if update_docker_package else 'present' }}"
     update_cache: "{{ update_docker_package }}"
     cache_valid_time: "{{ docker_apt_cache_valid_time }}"
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
 
 - name: Set systemd playbook var
   set_fact:
     is_systemd: false
   changed_when: false
+  tags: always
 
 - name: Set systemd playbook var
   set_fact:
     is_systemd: true
-  when: ( ansible_lsb.id|lower == "ubuntu" and ansible_distribution_version|version_compare('15.04', '>=') or ansible_lsb.id|lower == "debian" )
+  when: ( ansible_distribution == "Ubuntu" and ansible_distribution_version is version_compare('15.04', '>=') or ansible_distribution == "Debian" )
+  tags: always
+
+- name: Set docker_http_proxy_defined flag
+  set_fact:
+    docker_http_proxy_defined: "{{ docker_http_proxy is defined and docker_http_proxy is not none and docker_http_proxy != '' }}"
+  tags: proxy
+
+- name: Set docker_https_proxy_defined flag
+  set_fact:
+    docker_https_proxy_defined: "{{ docker_https_proxy is defined and docker_https_proxy is not none and docker_https_proxy != '' }}"
+  tags: proxy
+
+- name: Set docker_no_proxy_defined flag
+  set_fact:
+    docker_no_proxy_defined: "{{ docker_no_proxy is defined and docker_no_proxy is not none and docker_no_proxy != '' }}"
+  tags: proxy
 
 # https://github.com/moby/moby/issues/25471#issuecomment-263101090
 - name: Creates override directory (systemd)
   file:
     path: /etc/systemd/system/docker.service.d
-    state: directory
+    state: "{{ (daemon_json is not none or docker_http_proxy_defined or docker_https_proxy_defined or docker_no_proxy_defined) | ternary('directory', 'absent') }}"
     owner: root
     group: root
     mode: 0755
-  when: daemon_json != "" and is_systemd
+  when:
+    - is_systemd
+  tags: proxy
 
 - name: Set docker daemon override (systemd)
   copy:
@@ -138,7 +150,15 @@
   notify:
     - Reload systemd
     - Restart docker
-  when: daemon_json != "" and is_systemd
+  when: daemon_json is not none and is_systemd
+
+- name: Ensure /etc/docker is present
+  file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
 
 - name: Set /etc/docker/daemon.json
   copy:
@@ -149,7 +169,7 @@
     mode: 0644
   notify:
     - Restart docker
-  when: daemon_json != ""
+  when: daemon_json is not none
 
 - name: Fix DNS in docker.io
   lineinfile:
@@ -161,20 +181,19 @@
   when: docker_pkg_name == 'docker.io'
 
 - meta: flush_handlers
-  when: "dns_fix|changed"
 
 - pause:
     seconds: 1
-  when: "dns_fix|changed"
+  when: "dns_fix is changed"
 
 # We must install pip via apt before we can use the pip module below
 - name: "Install {{ _python_packages | join(', ') }} packages with apt"
   apt:
-    pkg: "{{ item }}"
+    pkg: "{{ _python_packages }}"
     state: latest
     update_cache: yes
     cache_valid_time: "{{ docker_apt_cache_valid_time }}"
-  with_items: "{{ _python_packages }}"
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
 
 # Display an informative message if the docker-compose version needs to be downgraded
 - name: Docker-compose version downgrade
@@ -221,6 +240,7 @@
     - name: docker-compose
       version: "{{ _pip_version_docker_compose }}"
       install: "{{ pip_install_docker_compose }}"
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
   when: item.install|bool
 
 - name: Check if /etc/updatedb.conf exists
@@ -237,25 +257,28 @@
     line: 'PRUNEPATHS="/var/lib/docker \2"'
   when: updatedb_conf_exists.stat.exists
 
-- name: Check if /etc/default/ufw exists
-  stat:
-    path: /etc/default/ufw
-  register: ufw_default_exists
+- block:
+    - name: Check if /etc/default/ufw exists
+      stat:
+        path: /etc/default/ufw
+      register: ufw_default_exists
 
-- name: Change ufw default forward policy from drop to accept
-  lineinfile:
-    dest: /etc/default/ufw
-    regexp: "^DEFAULT_FORWARD_POLICY="
-    line: "DEFAULT_FORWARD_POLICY=\"ACCEPT\""
-  when: ufw_default_exists.stat.exists
+    - name: Change ufw default forward policy from drop to accept
+      lineinfile:
+        dest: /etc/default/ufw
+        regexp: "^DEFAULT_FORWARD_POLICY="
+        line: "DEFAULT_FORWARD_POLICY=\"ACCEPT\""
+      when: ufw_default_exists.stat.exists
+  when: ufw_set_forward_policy
 
 - name: Set docker HTTP_PROXY if docker_http_proxy defined
   lineinfile:
     dest: /etc/default/docker
-    regexp: "^export HTTP_PROXY="
-    line: "export HTTP_PROXY=\"{{docker_http_proxy}}\""
-    state: present
-  when: docker_http_proxy is defined and (docker_http_proxy != None)
+    regexp: "^export http_proxy="
+    line: "export http_proxy=\"{{docker_http_proxy}}\""
+    state: "{{ docker_http_proxy_defined | ternary('present', 'absent') }}"
+  when:
+    - not is_systemd
   notify:
     - Restart docker
   tags: proxy
@@ -263,25 +286,63 @@
 - name: Set docker HTTPS_PROXY if docker_https_proxy defined
   lineinfile:
     dest: /etc/default/docker
-    regexp: "^export HTTPS_PROXY="
-    line: "export HTTPS_PROXY=\"{{docker_https_proxy}}\""
-    state: present
-  when: docker_https_proxy is defined and (docker_https_proxy != None)
+    regexp: "^export https_proxy="
+    line: "export https_proxy=\"{{docker_https_proxy}}\""
+    state: "{{ docker_https_proxy_defined | ternary('present', 'absent') }}"
+  when:
+    - not is_systemd
   notify:
     - Restart docker
+  tags: proxy
+
+- name: Set docker NO_PROXY if docker_no_proxy defined
+  lineinfile:
+    dest: /etc/default/docker
+    regexp: "^export no_proxy="
+    line: "export no_proxy=\"{{docker_no_proxy}}\""
+    state: "{{ docker_no_proxy_defined | ternary('present', 'absent') }}"
+  when:
+    - not is_systemd
+  notify:
+    - Restart docker
+  tags: proxy
+
+- name: Set docker HTTP(S)_PROXY if docker_http(s)_proxy defined (systemd)
+  copy:
+    content: |
+      [Service]
+      Environment="{% if docker_http_proxy_defined %}http_proxy={{ docker_http_proxy }}{% endif %}"
+      Environment="{% if docker_https_proxy_defined %}https_proxy={{ docker_https_proxy }}{% endif %}"
+      Environment="{% if docker_no_proxy_defined %}no_proxy={{ docker_no_proxy }}{% endif %}"
+    dest: /etc/systemd/system/docker.service.d/proxy.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify:
+    - Reload systemd
+    - Restart docker
+  when:
+    - is_systemd
+    - docker_http_proxy_defined or docker_https_proxy_defined or docker_no_proxy_defined
+  tags: proxy
+
+- name: Remove docker HTTP(S)_PROXY if docker_http(s)_proxy undefined (systemd)
+  file:
+    path: /etc/systemd/system/docker.service.d/proxy.conf
+    state: absent
+  notify:
+    - Reload systemd
+    - Restart docker
+  when:
+    - is_systemd
+    - not docker_http_proxy_defined and not docker_https_proxy_defined and not docker_no_proxy_defined
   tags: proxy
 
 - name: Start docker
   service:
     name: docker
     state: started
-  when: docker_pkg_name.find('lxc-docker') != -1 or docker_pkg_name.find('docker-engine') != -1
-
-- name: Start docker.io
-  service:
-    name: docker.io
-    state: started
-  when: docker_pkg_name == 'docker.io'
+  when: start_docker_daemon
 
   # ATTENTION: this task can potentially create new users!
 - name: Add users to the docker group
