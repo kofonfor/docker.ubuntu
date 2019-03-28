@@ -136,6 +136,7 @@
     mode: 0755
   when:
     - is_systemd
+    - not external_overrides
   tags: proxy
 
 - name: Set docker daemon override (systemd)
@@ -151,7 +152,7 @@
   notify:
     - Reload systemd
     - Restart docker
-  when: daemon_json is not none and is_systemd
+  when: daemon_json is not none and is_systemd and not external_overrides
 
 - name: Ensure /etc/docker is present
   file:

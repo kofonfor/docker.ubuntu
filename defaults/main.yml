@@ -114,3 +114,5 @@ start_docker_daemon: true
 #  http_proxy: 'http://192.168.0.10'
 #  https_proxy: 'http://192.168.0.10'
 #  no_proxy: '192.168.0.20'
+
+external_overrides: false
